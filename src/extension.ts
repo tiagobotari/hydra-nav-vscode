@@ -497,17 +497,413 @@ class HydraCompletionProvider implements vscode.CompletionItemProvider {
   }
 }
 
+/**
+ * Indexes Python classes and functions across the workspace
+ * for _target_ autocomplete suggestions.
+ */
+class PythonSymbolIndex {
+  // Map from module dotted path (e.g. "src.methods.melime_method") -> symbols[]
+  private moduleSymbols = new Map<
+    string,
+    { name: string; kind: string; line: number; uri: vscode.Uri }[]
+  >();
+  // All symbols for unqualified search
+  private allSymbols: {
+    name: string;
+    kind: string;
+    modulePath: string;
+    uri: vscode.Uri;
+  }[] = [];
+  private initialized = false;
+
+  async ensureInitialized() {
+    if (this.initialized) return;
+    await this.refresh();
+    this.initialized = true;
+  }
+
+  async refresh() {
+    this.moduleSymbols.clear();
+    this.allSymbols = [];
+
+    const pyFiles = await vscode.workspace.findFiles(
+      "**/*.py",
+      "{**/node_modules/**,**/venv/**,**/.git/**,**/__pycache__/**}"
+    );
+
+    for (const uri of pyFiles) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const symbols: {
+          name: string;
+          kind: string;
+          line: number;
+          uri: vscode.Uri;
+        }[] = [];
+
+        for (let i = 0; i < doc.lineCount; i++) {
+          const lineText = doc.lineAt(i).text;
+          const classMatch = lineText.match(/^class\s+(\w+)/);
+          if (classMatch) {
+            symbols.push({
+              name: classMatch[1],
+              kind: "class",
+              line: i,
+              uri,
+            });
+          }
+          const funcMatch = lineText.match(/^def\s+(\w+)/);
+          if (funcMatch && !funcMatch[1].startsWith("_")) {
+            symbols.push({
+              name: funcMatch[1],
+              kind: "function",
+              line: i,
+              uri,
+            });
+          }
+        }
+
+        if (symbols.length > 0) {
+          // Convert file path to dotted module path
+          const wsFolder = vscode.workspace.getWorkspaceFolder(uri);
+          if (wsFolder) {
+            const relPath = uri.fsPath
+              .replace(wsFolder.uri.fsPath + "/", "")
+              .replace(/\.py$/, "")
+              .replace(/\//g, ".");
+            this.moduleSymbols.set(relPath, symbols);
+            for (const sym of symbols) {
+              this.allSymbols.push({ ...sym, modulePath: relPath });
+            }
+          }
+        }
+      } catch {
+        // Skip files that can't be opened
+      }
+    }
+  }
+
+  /** Search symbols matching a partial query */
+  search(query: string): {
+    name: string;
+    kind: string;
+    modulePath: string;
+    fullTarget: string;
+  }[] {
+    const results: {
+      name: string;
+      kind: string;
+      modulePath: string;
+      fullTarget: string;
+    }[] = [];
+    const lowerQuery = query.toLowerCase();
+    const parts = query.split(".");
+    const lastPart = parts[parts.length - 1].toLowerCase();
+    const modulePrefix = parts.slice(0, -1).join(".").toLowerCase();
+
+    for (const sym of this.allSymbols) {
+      const fullTarget = `${sym.modulePath}.${sym.name}`;
+
+      // If query has dots, match module prefix + symbol
+      if (modulePrefix) {
+        if (
+          sym.modulePath.toLowerCase().startsWith(modulePrefix) &&
+          sym.name.toLowerCase().startsWith(lastPart)
+        ) {
+          results.push({ ...sym, fullTarget });
+        }
+      } else {
+        // Match symbol name or module path
+        if (
+          sym.name.toLowerCase().includes(lowerQuery) ||
+          sym.modulePath.toLowerCase().includes(lowerQuery)
+        ) {
+          results.push({ ...sym, fullTarget });
+        }
+      }
+
+      if (results.length >= 30) break;
+    }
+
+    return results;
+  }
+
+  /** Get symbols for a specific module */
+  getModuleSymbols(
+    modulePath: string
+  ): { name: string; kind: string; line: number; uri: vscode.Uri }[] {
+    return this.moduleSymbols.get(modulePath) || [];
+  }
+}
+
+/**
+ * Provides autocomplete for _target_ values.
+ * Suggests Python classes and functions with their full dotted paths.
+ */
+class HydraTargetCompletionProvider implements vscode.CompletionItemProvider {
+  constructor(private pythonIndex: PythonSymbolIndex) {}
+
+  async provideCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): Promise<vscode.CompletionItem[] | null> {
+    const line = document.lineAt(position).text;
+
+    // Only trigger on _target_ lines
+    const targetMatch = line.match(/_target_:\s*["']?(.*)$/);
+    if (!targetMatch) return null;
+
+    await this.pythonIndex.ensureInitialized();
+
+    const query = targetMatch[1].trim().replace(/["']$/, "");
+    const symbols = this.pythonIndex.search(query);
+
+    return symbols.map((sym) => {
+      const item = new vscode.CompletionItem(
+        sym.fullTarget,
+        sym.kind === "class"
+          ? vscode.CompletionItemKind.Class
+          : vscode.CompletionItemKind.Function
+      );
+      item.detail = `${sym.kind} in ${sym.modulePath}`;
+      item.filterText = sym.fullTarget;
+      // Replace the entire value after _target_:
+      const colonIdx = line.indexOf(":", line.indexOf("_target_"));
+      const valueStart = colonIdx + 1;
+      const trimmedStart =
+        valueStart + (line.substring(valueStart).length - line.substring(valueStart).trimStart().length);
+      item.range = new vscode.Range(
+        position.line,
+        trimmedStart,
+        position.line,
+        line.length
+      );
+      item.insertText = sym.fullTarget;
+      return item;
+    });
+  }
+}
+
+/**
+ * Resolves Hydra/OmegaConf interpolations like ${db.host} on hover.
+ * Walks the config tree to find the referenced value.
+ */
+class HydraInterpolationHoverProvider implements vscode.HoverProvider {
+  async provideHover(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): Promise<vscode.Hover | null> {
+    const line = document.lineAt(position).text;
+
+    // Find ${...} interpolation under cursor
+    const interpolations = this.findInterpolations(line);
+    for (const interp of interpolations) {
+      if (
+        position.character >= interp.start &&
+        position.character <= interp.end
+      ) {
+        const resolved = await this.resolveInterpolation(
+          document,
+          interp.expression
+        );
+        if (resolved) {
+          const md = new vscode.MarkdownString();
+          md.appendMarkdown(`**\`\${${interp.expression}}\`** resolves to:\n\n`);
+          md.appendCodeblock(resolved.value, "yaml");
+          if (resolved.source) {
+            md.appendMarkdown(`\n*from \`${resolved.source}\`*`);
+          }
+          const range = new vscode.Range(
+            position.line,
+            interp.start,
+            position.line,
+            interp.end
+          );
+          return new vscode.Hover(md, range);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private findInterpolations(
+    line: string
+  ): { expression: string; start: number; end: number }[] {
+    const results: { expression: string; start: number; end: number }[] = [];
+    const regex = /\$\{([^}]+)\}/g;
+    let match;
+    while ((match = regex.exec(line)) !== null) {
+      results.push({
+        expression: match[1],
+        start: match.index,
+        end: match.index + match[0].length,
+      });
+    }
+    return results;
+  }
+
+  private async resolveInterpolation(
+    document: vscode.TextDocument,
+    expression: string
+  ): Promise<{ value: string; source: string } | null> {
+    // Handle OmegaConf resolvers like oc.env:VAR, oc.decode, etc.
+    if (expression.startsWith("oc.")) {
+      return { value: `OmegaConf resolver: ${expression}`, source: "" };
+    }
+
+    // Handle hydra resolvers
+    if (expression.startsWith("hydra:")) {
+      return { value: `Hydra resolver: ${expression}`, source: "" };
+    }
+
+    // Resolve dotted key path like "db.host" or "model.lr"
+    const keyParts = expression.split(".");
+
+    // First, try to resolve within the current file
+    const localResult = this.resolveInDocument(document, keyParts);
+    if (localResult) {
+      const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+      const relPath = wsFolder
+        ? document.uri.fsPath.replace(wsFolder.uri.fsPath + "/", "")
+        : document.uri.fsPath;
+      return { value: localResult, source: relPath };
+    }
+
+    // Try to find in config files matching the first key part
+    const configGroup = keyParts[0];
+    const remainingKeys = keyParts.slice(1);
+
+    const yamlFiles = await vscode.workspace.findFiles(
+      `**/${configGroup}.yaml`,
+      "{**/node_modules/**,**/venv/**,**/.git/**}"
+    );
+
+    // Also search in directories matching the config group
+    const dirFiles = await vscode.workspace.findFiles(
+      `**/${configGroup}/*.yaml`,
+      "{**/node_modules/**,**/venv/**,**/.git/**}"
+    );
+
+    const allCandidates = [...yamlFiles, ...dirFiles];
+
+    for (const uri of allCandidates) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const result = this.resolveInDocument(doc, remainingKeys);
+        if (result) {
+          const wsFolder = vscode.workspace.getWorkspaceFolder(uri);
+          const relPath = wsFolder
+            ? uri.fsPath.replace(wsFolder.uri.fsPath + "/", "")
+            : uri.fsPath;
+          return { value: result, source: relPath };
+        }
+      } catch {
+        // Skip
+      }
+    }
+
+    return null;
+  }
+
+  /** Walk a YAML document to find a value at a dotted key path */
+  private resolveInDocument(
+    document: vscode.TextDocument,
+    keyParts: string[]
+  ): string | null {
+    if (keyParts.length === 0) return null;
+
+    let currentIndent = -1;
+    let depth = 0;
+    let targetKey = keyParts[0];
+
+    for (let i = 0; i < document.lineCount; i++) {
+      const lineText = document.lineAt(i).text;
+      if (lineText.trim() === "" || lineText.trim().startsWith("#")) continue;
+
+      const indent = lineText.search(/\S/);
+      const keyValueMatch = lineText.match(/^(\s*)([\w-]+)\s*:\s*(.*)/);
+
+      if (!keyValueMatch) continue;
+
+      const lineIndent = keyValueMatch[1].length;
+      const key = keyValueMatch[2];
+      const value = keyValueMatch[3].trim();
+
+      // Track nesting depth
+      if (depth === 0) {
+        if (key === targetKey) {
+          if (keyParts.length === 1) {
+            // Found the final key
+            if (value) return value;
+            // Value might be on next lines (block scalar or nested)
+            const nextLines: string[] = [];
+            for (
+              let j = i + 1;
+              j < Math.min(i + 5, document.lineCount);
+              j++
+            ) {
+              const nl = document.lineAt(j).text;
+              if (nl.trim() === "" || nl.search(/\S/) <= lineIndent) break;
+              nextLines.push(nl.trim());
+            }
+            return nextLines.length > 0 ? nextLines.join("\n") : null;
+          }
+          // Go deeper
+          currentIndent = lineIndent;
+          depth = 1;
+          targetKey = keyParts[1];
+        }
+      } else {
+        if (lineIndent <= currentIndent) {
+          // Back at same or higher level — target not found in this subtree
+          return null;
+        }
+        if (key === targetKey) {
+          const remaining = keyParts.slice(depth + 1);
+          if (remaining.length === 0) {
+            if (value) return value;
+            const nextLines: string[] = [];
+            for (
+              let j = i + 1;
+              j < Math.min(i + 5, document.lineCount);
+              j++
+            ) {
+              const nl = document.lineAt(j).text;
+              if (nl.trim() === "" || nl.search(/\S/) <= lineIndent) break;
+              nextLines.push(nl.trim());
+            }
+            return nextLines.length > 0 ? nextLines.join("\n") : null;
+          }
+          currentIndent = lineIndent;
+          depth++;
+          targetKey = remaining[0];
+        }
+      }
+    }
+
+    return null;
+  }
+}
+
 export function activate(context: vscode.ExtensionContext) {
   const yamlSelector: vscode.DocumentSelector = { language: "yaml" };
   const configIndex = new ConfigIndex();
+  const pythonIndex = new PythonSymbolIndex();
 
-  // Refresh index when YAML files are created/deleted/renamed
-  const watcher = vscode.workspace.createFileSystemWatcher("**/*.yaml");
-  watcher.onDidCreate(() => configIndex.refresh());
-  watcher.onDidDelete(() => configIndex.refresh());
+  // Refresh indexes when files are created/deleted
+  const yamlWatcher = vscode.workspace.createFileSystemWatcher("**/*.yaml");
+  yamlWatcher.onDidCreate(() => configIndex.refresh());
+  yamlWatcher.onDidDelete(() => configIndex.refresh());
+
+  const pyWatcher = vscode.workspace.createFileSystemWatcher("**/*.py");
+  pyWatcher.onDidCreate(() => pythonIndex.refresh());
+  pyWatcher.onDidDelete(() => pythonIndex.refresh());
+  pyWatcher.onDidChange(() => pythonIndex.refresh());
 
   context.subscriptions.push(
-    watcher,
+    yamlWatcher,
+    pyWatcher,
     vscode.languages.registerDefinitionProvider(
       yamlSelector,
       new HydraTargetDefinitionProvider()
@@ -520,6 +916,10 @@ export function activate(context: vscode.ExtensionContext) {
       yamlSelector,
       new HydraHoverProvider(configIndex)
     ),
+    vscode.languages.registerHoverProvider(
+      yamlSelector,
+      new HydraInterpolationHoverProvider()
+    ),
     vscode.languages.registerCompletionItemProvider(
       yamlSelector,
       new HydraCompletionProvider(configIndex),
@@ -527,6 +927,12 @@ export function activate(context: vscode.ExtensionContext) {
       ":",
       " ",
       "/"
+    ),
+    vscode.languages.registerCompletionItemProvider(
+      yamlSelector,
+      new HydraTargetCompletionProvider(pythonIndex),
+      ".",
+      " "
     )
   );
 }
