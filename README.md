@@ -1,6 +1,6 @@
 # Hydra Config Navigator
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
 ![License](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)
 
 Ctrl+click navigation for [Hydra](https://hydra.cc/) config files in VSCode. Jump from YAML configs to Python source code and navigate between config references — just like you would in Python.
@@ -61,8 +61,41 @@ Hover over any reference to see a preview of the target file contents without na
 
 - **Config references**: Shows the first 20 lines of the target YAML file with the file path
 - **`_target_` references**: Shows the Python class/function definition and docstring
+- **Interpolations**: Hover over `${db.host}` to see the resolved value and its source file
 
-### Autocomplete
+### Interpolation Resolution
+
+Hover over OmegaConf interpolations to see their resolved values.
+
+```yaml
+db:
+  host: localhost
+  port: 5432
+
+server:
+  db_host: ${db.host}     # Hover → resolves to: localhost
+  db_port: ${db.port}     # Hover → resolves to: 5432
+```
+
+Supports:
+- Dotted key paths (`${db.host}`)
+- Cross-file resolution (looks up values in other config files)
+- OmegaConf resolvers (`${oc.env:VAR}`)
+- Hydra resolvers (`${hydra:runtime.cwd}`)
+
+### `_target_` Autocomplete
+
+Type `_target_:` and get suggestions for all Python classes and functions in your workspace.
+
+```yaml
+_target_: src.meth  # Autocomplete suggests: src.methods.melime_method.MeLIMEAttribution, etc.
+```
+
+- Indexes all `class` and `def` definitions in `*.py` files
+- Shows full dotted import path
+- Auto-refreshes when Python files change
+
+### Config Autocomplete
 
 Get suggestions for valid config names as you type.
 
