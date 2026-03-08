@@ -1,0 +1,36 @@
+{
+  "name": "hydra-nav",
+  "displayName": "Hydra Config Navigator",
+  "description": "Ctrl+click navigation for Hydra config files: _target_ to Python source and config cross-references",
+  "version": "0.1.0",
+  "author": "Tiago Botari",
+  "publisher": "tiagobotari",
+  "license": "CC-BY-NC-4.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "icon": "icon.png",
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "hydra",
+    "yaml",
+    "navigation",
+    "config",
+    "machine-learning"
+  ],
+  "activationEvents": [
+    "onLanguage:yaml"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.5",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}
