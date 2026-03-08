@@ -2,7 +2,7 @@
   "name": "hydra-nav",
   "displayName": "Hydra Config Navigator",
   "description": "Ctrl+click navigation for Hydra config files: _target_ to Python source and config cross-references",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Tiago Botari",
   "publisher": "tiagobotari",
   "license": "CC-BY-NC-4.0",
