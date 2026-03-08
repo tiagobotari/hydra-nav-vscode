@@ -37,6 +37,15 @@ defaults:
   - override /metrics: all         # Ctrl+click → opens metrics/all.yaml
 ```
 
+### Nested Key Paths
+
+Supports nested config group paths for deeply organized config structures.
+
+```yaml
+defaults:
+  - override /dataset/transforms: augment  # Ctrl+click → opens dataset/transforms/augment.yaml
+```
+
 ### Inline Value References
 
 Ctrl+click on inline config values that reference other config files.
@@ -46,10 +55,25 @@ dataset: mnist          # Ctrl+click → opens dataset/mnist.yaml
 model: cnn_mnist        # Ctrl+click → opens model/cnn_mnist.yaml
 ```
 
+### Hover Previews
+
+Hover over any reference to see a preview of the target file contents without navigating away.
+
+- **Config references**: Shows the first 20 lines of the target YAML file with the file path
+- **`_target_` references**: Shows the Python class/function definition and docstring
+
+### Autocomplete
+
+Get suggestions for valid config names as you type.
+
+- Under a `methods:` key, suggests all files in the `method/` directory
+- In `defaults` lists, suggests files matching the config group
+- Inline values suggest files from the matching config group
+
 ### Automatic Workspace Scanning
 
 - Scans the entire workspace for YAML files on activation
-- Builds an index mapping filenames to directories
+- Builds an index mapping filenames, directories, and nested paths
 - Automatically refreshes when YAML files are created or deleted
 - Resolves references using singular/plural directory name variants (e.g., `methods` key → `method/` directory)
 
